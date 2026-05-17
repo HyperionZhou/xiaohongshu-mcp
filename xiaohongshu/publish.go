@@ -1219,9 +1219,9 @@ func searchAndSelectProduct(page *rod.Page, modal *rod.Element, keyword string) 
 	time.Sleep(500 * time.Millisecond) // 额外等待确保渲染完成
 
 	// 5. 点击第一个商品的 checkbox。XHS card 内部 checkbox 是 lazy 渲染，
-	// 单次 modal.Element 经常找不到 → poll 5s（每 200ms 重试），找到才继续。
+	// 实测 5s 不够（fresh chrome + 完整商品名也失败），bump 到 15s。
 	var checkbox *rod.Element
-	checkboxDeadline := time.Now().Add(5 * time.Second)
+	checkboxDeadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(checkboxDeadline) {
 		checkbox, err = modal.Element(".goods-list-normal .good-card-container .d-checkbox")
 		if err == nil && checkbox != nil {
