@@ -2,9 +2,11 @@ package xiaohongshu
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -1033,6 +1035,42 @@ func confirmOriginalDeclaration(page *rod.Page) error {
 	return nil
 }
 
+// debugDumpEnabled 报告是否启用 DOM dump (ENV XHS_DUMP_DOM 非空).
+// caller 用它在 DOM query 之前 short-circuit, 保证 env 关闭时彻底 no-op
+// (不额外 query DOM, 不影响 production timing).
+func debugDumpEnabled() bool {
+	return os.Getenv("XHS_DUMP_DOM") != ""
+}
+
+// dumpDOMForDebug 调试用 — 把元素 outerHTML 写到 /app/data/dump_*.html,
+// 仅当 debugDumpEnabled() 时启用. 用于排查 bind product 等 DOM 兼容问题.
+// 通过 volume mount /app/data 持久化到 host 的 xhs-data/, 容器重启不丢.
+//
+// elFn 是 closure: 只有 env 开启时才被调用 → 关闭时不会 query DOM 或触发 MustElement panic.
+func dumpDOMForDebug(label, keyword string, elFn func() *rod.Element) {
+	if !debugDumpEnabled() {
+		return
+	}
+	el := elFn()
+	if el == nil {
+		slog.Info("[DOM DUMP] skip (nil element)", "label", label, "keyword", keyword)
+		return
+	}
+	html, err := el.HTML()
+	if err != nil {
+		slog.Error("[DOM DUMP] read HTML failed", "label", label, "keyword", keyword, "error", err)
+		return
+	}
+	safeKw := strings.ReplaceAll(keyword, "/", "_")
+	// UnixNano 防同秒多次 dump 覆盖 (multi-product bind 时一秒会有 4+ dump).
+	fn := filepath.Join("/app/data", fmt.Sprintf("dump_%s_%s_%d.html", label, safeKw, time.Now().UnixNano()))
+	if err := os.WriteFile(fn, []byte(html), 0o644); err != nil {
+		slog.Error("[DOM DUMP] write failed", "label", label, "keyword", keyword, "file", fn, "error", err)
+		return
+	}
+	slog.Info("[DOM DUMP] saved", "label", label, "keyword", keyword, "file", fn, "bytes", len(html))
+}
+
 // bindProducts 绑定商品到发布内容
 func bindProducts(page *rod.Page, products []string) error {
 	if len(products) == 0 {
@@ -1218,6 +1256,15 @@ func searchAndSelectProduct(page *rod.Page, modal *rod.Element, keyword string) 
 	}
 	time.Sleep(500 * time.Millisecond) // 额外等待确保渲染完成
 
+	// [DEBUG INSTRUMENTATION] dump 搜索完成后的 goods-list-normal 全貌（看返回了几个 card,
+	// 是否带 SKU 入口, 是否有 disabled 标识等）. closure 保证 env 关闭时不 query DOM.
+	dumpDOMForDebug("after-search", keyword, func() *rod.Element {
+		if el, _ := modal.Element(".goods-list-normal"); el != nil {
+			return el
+		}
+		return modal
+	})
+
 	// 5. 点击第一个商品的 checkbox。XHS card 内部 checkbox 是 lazy 渲染，
 	// 实测 5s 不够（fresh chrome + 完整商品名也失败），bump 到 15s。
 	var checkbox *rod.Element
@@ -1230,8 +1277,19 @@ func searchAndSelectProduct(page *rod.Page, modal *rod.Element, keyword string) 
 		time.Sleep(200 * time.Millisecond)
 	}
 	if err != nil || checkbox == nil {
+		// [DEBUG INSTRUMENTATION] checkbox 找不到时 dump 第一张商品卡，看结构差异.
+		dumpDOMForDebug("no-checkbox-first-card", keyword, func() *rod.Element {
+			card, _ := modal.Element(".goods-list-normal .good-card-container")
+			return card
+		})
 		return errors.Wrap(err, "未找到商品选择框")
 	}
+
+	// [DEBUG INSTRUMENTATION] checkbox 找到时也 dump 一份做对照（成功/失败结构对比）.
+	dumpDOMForDebug("found-checkbox-first-card", keyword, func() *rod.Element {
+		card, _ := modal.Element(".goods-list-normal .good-card-container")
+		return card
+	})
 
 	// 检查是否已经选中
 	isChecked, err := checkbox.Eval(`(el) => {
@@ -1250,6 +1308,14 @@ func searchAndSelectProduct(page *rod.Page, modal *rod.Element, keyword string) 
 	// 6. 随机延迟模拟人为操作（800-1500ms）
 	randomDelay := 800 + rand.Intn(700)
 	time.Sleep(time.Duration(randomDelay) * time.Millisecond)
+
+	// [DEBUG INSTRUMENTATION] 点 checkbox 后 dump page body，看是否弹出 SKU 选规格子弹窗
+	// （多 SKU 商品常见行为：点 checkbox 不直接勾，先弹规格选择）.
+	// 用 Element (非 MustElement) 避免 env 关闭时仍可能 panic 的边角情况.
+	dumpDOMForDebug("after-checkbox-click-body", keyword, func() *rod.Element {
+		body, _ := page.Element("body")
+		return body
+	})
 
 	slog.Info("已选择商品", "keyword", keyword)
 	return nil
