@@ -1,6 +1,6 @@
 # Dockerfile for ARM64 architecture
-# This Dockerfile uses Chromium (auto-downloaded by go-rod) instead of Google Chrome
-# because Google Chrome does not provide official Linux ARM64 builds.
+# 使用 Debian apt 安装的本地 Chromium (ROD_BROWSER_BIN=/usr/bin/chromium),
+# 不走 go-rod 运行时 CDN 下载. Google Chrome 无官方 Linux ARM64 build.
 
 # ---- build stage ----
 FROM golang:1.24 AS builder
