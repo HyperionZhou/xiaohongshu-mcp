@@ -345,8 +345,80 @@ func submitPublish(page *rod.Page, title, content string, tags []string, schedul
 		return err
 	}
 
-	time.Sleep(3 * time.Second)
+	// 等 XHS 后端 confirm 发布成功：URL 跳转到 /publish/success 或 DOM 出现 .success-page。
+	// 没等 confirmation 就 return 是历史 bug：mcp 返 200 但 XHS 后端可能拒（违规/审核/图片
+	// fail），publisher 误判成功，DB 写错状态。30s 超时给 XHS 后端足够时间（实测 ~3s 内跳转）。
+	if err := waitForPublishSuccess(page, 30*time.Second); err != nil {
+		return errors.Wrap(err, "发布完成确认失败")
+	}
 	return nil
+}
+
+// waitForPublishSuccess 等 XHS 后端 confirm 发布成功。
+// 用单次 JS Eval 原子读 URL + visible DOM + 失败 toast，避开 rod page.Element
+// 默认 sleeper 永久阻塞（codex review must）。
+//
+// 成功 signal（任一即视为成功）：
+//  1. URL 含 "/publish/success"（XHS SPA 跳转，最强信号）
+//  2. URL 含 "/publish/publish?...published=true"（dump 证据 t10 出现，二次确认）
+//  3. visible `.success-page .success-title` 含 "发布成功"（DOM fallback，要求 visible）
+//
+// 失败 signal（短路返回 error 不等 timeout）：
+//
+//	body 含 "发布失败/内容违规/审核未通过/上传失败/网络异常/请稍后再试" 任一字串
+//
+// 都没等到（默认 30s）→ 返回 timeout error，携带 last_url 给排查。
+func waitForPublishSuccess(page *rod.Page, maxWait time.Duration) error {
+	deadline := time.Now().Add(maxWait)
+	probe := `() => {
+		const url = location.href;
+		const titleEl = document.querySelector('.success-page .success-title');
+		let titleVisible = false;
+		if (titleEl) {
+			const rect = titleEl.getBoundingClientRect();
+			const style = window.getComputedStyle(titleEl);
+			titleVisible = rect.width > 0 && rect.height > 0
+				&& style.display !== 'none'
+				&& style.visibility !== 'hidden';
+		}
+		const titleOk = titleVisible && ((titleEl.innerText || '').indexOf('发布成功') >= 0);
+		const failTexts = ['发布失败','内容违规','审核未通过','上传失败','网络异常','请稍后再试'];
+		const body = (document.body && document.body.innerText) || '';
+		let failMatch = '';
+		for (const t of failTexts) { if (body.indexOf(t) >= 0) { failMatch = t; break; } }
+		return {
+			url: url,
+			urlSuccess: url.indexOf('/publish/success') >= 0,
+			urlPublished: /\/publish\/publish.*published=true/.test(url),
+			successDOM: titleOk,
+			failText: failMatch
+		};
+	}`
+	var lastURL string
+	for time.Now().Before(deadline) {
+		res, err := page.Eval(probe)
+		if err == nil && res != nil {
+			v := res.Value
+			lastURL = v.Get("url").String()
+			if ft := v.Get("failText").String(); ft != "" {
+				return errors.Errorf("发布失败 detected: %s (url=%s)", ft, lastURL)
+			}
+			if v.Get("urlSuccess").Bool() {
+				slog.Info("发布成功 confirmed (URL=/publish/success)", "url", lastURL)
+				return nil
+			}
+			if v.Get("successDOM").Bool() {
+				slog.Info("发布成功 confirmed (DOM visible)", "url", lastURL)
+				return nil
+			}
+			if v.Get("urlPublished").Bool() {
+				slog.Info("发布成功 confirmed (URL ?published=true)", "url", lastURL)
+				return nil
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return errors.Errorf("等待发布成功超时 %s (last_url=%s)", maxWait, lastURL)
 }
 
 type publishButton struct {
