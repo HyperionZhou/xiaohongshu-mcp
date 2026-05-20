@@ -1202,8 +1202,35 @@ func waitForProductModal(page *rod.Page) (*rod.Element, error) {
 	return nil, errors.New("等待商品选择弹窗超时")
 }
 
-// searchAndSelectProduct 搜索并选择商品
+// searchAndSelectProduct 搜索并选择商品。
+// 偶发 race：第一次搜某 keyword 后 checkbox lazy mount 慢，15s wait 超时。
+// 同 modal 内重新 input + Enter 通常能 settle —— 失败时 retry 1 次。
+// 不 reopen modal：log 证据显示 modal 引用稳定（后续 keyword 同 modal 内立即成功）。
 func searchAndSelectProduct(page *rod.Page, modal *rod.Element, keyword string) error {
+	const maxAttempts = 2
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			slog.Warn("搜索商品 retry",
+				"keyword", keyword,
+				"attempt", attempt,
+				"prev_err", lastErr.Error())
+			time.Sleep(2 * time.Second) // 等页面 settle
+		}
+		err := searchAndSelectProductOnce(page, modal, keyword)
+		if err == nil {
+			if attempt > 1 {
+				slog.Info("搜索商品 retry 成功", "keyword", keyword, "attempt", attempt)
+			}
+			return nil
+		}
+		lastErr = err
+	}
+	return errors.Wrapf(lastErr, "搜索商品失败 (after %d attempts)", maxAttempts)
+}
+
+// searchAndSelectProductOnce 单次搜索 + 选中商品。原 searchAndSelectProduct 逻辑。
+func searchAndSelectProductOnce(page *rod.Page, modal *rod.Element, keyword string) error {
 	slog.Info("搜索商品", "keyword", keyword)
 
 	// 1. 获取搜索框
@@ -1212,7 +1239,12 @@ func searchAndSelectProduct(page *rod.Page, modal *rod.Element, keyword string) 
 		return errors.Wrap(err, "未找到商品搜索框")
 	}
 
-	// 2. 清空并输入关键词（使用原生 JS setter + 完整事件）
+	// 2. 清空并输入关键词（使用原生 JS setter + 完整事件）。
+	// retry 路径：先显式 Click 确保 input 拿到 focus，避免 attempt 1 timeout 后
+	// 焦点跑到别处导致 SelectAllText/Input 命中错的元素（codex review must）。
+	if err := searchInput.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		slog.Warn("点击搜索框失败", "error", err)
+	}
 	if err := searchInput.SelectAllText(); err != nil {
 		slog.Warn("选择搜索框文本失败", "error", err)
 	}
