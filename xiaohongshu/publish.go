@@ -1511,37 +1511,39 @@ func bindGroupChat(page *rod.Page, name string) error {
 	if err := trigger.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return errors.Wrap(err, "点击群聊下拉框失败")
 	}
-	time.Sleep(800 * time.Millisecond) // 等下拉展开 + 群列表 lazy render
 
-	// 遍历选项，按 .group-info .name 精确匹配（非群选项无 .group-info → 跳过）
-	opts, err := page.Elements("div.d-options-wrapper div.d-grid-item div.custom-option")
-	if err != nil {
-		return errors.Wrap(err, "查找群聊选项失败")
-	}
+	// 轮询群选项（XHS 下拉 lazy render，固定 sleep 会 race；products 也踩过同坑）。
+	// 最多 10s：出现匹配即点选返回；超时仍无匹配才判失败（必绑→整帖失败，codex P2）。
+	deadline := time.Now().Add(10 * time.Second)
 	var available []string
-	for _, opt := range opts {
-		// 用 Elements（非阻塞、空 slice 即无）而非 Element：非群选项（可见范围/地点等
-		// custom-option 无 .group-info）会让 opt.Element 默认 retry 卡到 300s（codex P2）。
-		names, _ := opt.Elements("div.group-info div.name")
-		if len(names) == 0 {
-			continue
-		}
-		gname, e := names[0].Text()
-		if e != nil {
-			continue
-		}
-		gname = strings.TrimSpace(gname)
-		available = append(available, gname)
-		if gname == name {
-			if err := opt.Click(proto.InputMouseButtonLeft, 1); err != nil {
-				return errors.Wrap(err, "选择群聊失败")
+	for time.Now().Before(deadline) {
+		opts, _ := page.Elements("div.d-options-wrapper div.d-grid-item div.custom-option")
+		available = available[:0]
+		for _, opt := range opts {
+			// Elements（非阻塞）而非 Element：非群选项（可见范围/地点等 custom-option 无
+			// .group-info）会让 opt.Element 默认 retry 卡到 300s。
+			names, _ := opt.Elements("div.group-info div.name")
+			if len(names) == 0 {
+				continue
 			}
-			slog.Info("已选择群聊", "name", name)
-			time.Sleep(300 * time.Millisecond)
-			return nil
+			gname, e := names[0].Text()
+			if e != nil {
+				continue
+			}
+			gname = strings.TrimSpace(gname)
+			available = append(available, gname)
+			if gname == name {
+				if err := opt.Click(proto.InputMouseButtonLeft, 1); err != nil {
+					return errors.Wrap(err, "选择群聊失败")
+				}
+				slog.Info("已选择群聊", "name", name)
+				time.Sleep(300 * time.Millisecond)
+				return nil
+			}
 		}
+		time.Sleep(300 * time.Millisecond)
 	}
-	return errors.Errorf("未找到群聊 %q（账号可选群: %v）", name, available)
+	return errors.Errorf("未找到群聊 %q（10s 内账号可选群: %v）", name, available)
 }
 
 // bindLivePreviewComponent 关联最近一场未来直播预告（"添加组件"区「关联直播预告」→ d-modal）。
@@ -1585,12 +1587,19 @@ func bindLivePreviewComponent(page *rod.Page) error {
 		return errors.New("等待直播预告弹窗超时")
 	}
 
-	items, err := listArea.Elements("div.list-item")
-	if err != nil {
-		return errors.Wrap(err, "查找直播预告列表项失败")
+	// 轮询列表项（async 加载，list-area 可能先于 item 渲染 → 查一次会 race、漏绑已存在的
+	// 预告，codex P2）。最多 8s：出现 item 即处理；超时仍无 → 视为无未来预告跳过。
+	var items rod.Elements
+	itemDeadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(itemDeadline) {
+		items, _ = listArea.Elements("div.list-item")
+		if len(items) > 0 {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
 	}
 	if len(items) == 0 {
-		slog.Info("无未来直播预告，跳过")
+		slog.Info("无未来直播预告（8s 内无列表项），跳过")
 		return nil // defer 关弹窗
 	}
 
