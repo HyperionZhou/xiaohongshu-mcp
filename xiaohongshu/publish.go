@@ -1520,11 +1520,13 @@ func bindGroupChat(page *rod.Page, name string) error {
 	}
 	var available []string
 	for _, opt := range opts {
-		nameEl, e := opt.Element("div.group-info div.name")
-		if e != nil || nameEl == nil {
+		// 用 Elements（非阻塞、空 slice 即无）而非 Element：非群选项（可见范围/地点等
+		// custom-option 无 .group-info）会让 opt.Element 默认 retry 卡到 300s（codex P2）。
+		names, _ := opt.Elements("div.group-info div.name")
+		if len(names) == 0 {
 			continue
 		}
-		gname, e := nameEl.Text()
+		gname, e := names[0].Text()
 		if e != nil {
 			continue
 		}
@@ -1629,11 +1631,12 @@ func pickSoonestLiveItem(items []*rod.Element) (*rod.Element, string) {
 	var bestT time.Time
 	var bestStr string
 	for _, it := range items {
-		span, e := it.Element("div.item-left div.header span")
-		if e != nil || span == nil {
+		// Elements（非阻塞）而非 Element：缺 header span 的项不会卡到 300s page timeout。
+		spans, _ := it.Elements("div.item-left div.header span")
+		if len(spans) == 0 {
 			continue
 		}
-		raw, e := span.Text()
+		raw, e := spans[0].Text()
 		if e != nil {
 			continue
 		}
