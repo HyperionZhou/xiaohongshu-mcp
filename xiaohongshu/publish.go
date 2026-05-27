@@ -1560,12 +1560,15 @@ func bindLivePreviewComponent(page *rod.Page) error {
 	if err := card.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return errors.Wrap(err, "点击直播预告入口失败")
 	}
+	// 点开后所有返回路径都关弹窗，避免出错时弹窗遮挡后续 clickPublishButton（codex P2）。
+	defer closeLivePreviewModal(page)
 
-	// 等弹窗列表区出现（async 拉取预告，给足时间）
+	// 等弹窗列表区出现（async 拉取预告）。用非阻塞 page.Has —— page.Element 默认 sleeper 会
+	// retry 到 page 的 300s timeout，把"10s best-effort"拖成几分钟（codex P2）。
 	var listArea *rod.Element
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if el, e := page.Element("div.list-area"); e == nil && el != nil {
+		if has, el, _ := page.Has("div.list-area"); has && el != nil {
 			if visible, _ := el.Visible(); visible {
 				listArea = el
 				break
@@ -1583,8 +1586,7 @@ func bindLivePreviewComponent(page *rod.Page) error {
 	}
 	if len(items) == 0 {
 		slog.Info("无未来直播预告，跳过")
-		closeLivePreviewModal(page)
-		return nil
+		return nil // defer 关弹窗
 	}
 
 	// 选最近一场（开播时间升序最早）；解析全失败则退化取第一项
@@ -1614,9 +1616,7 @@ func bindLivePreviewComponent(page *rod.Page) error {
 	}
 	time.Sleep(800 * time.Millisecond)
 	slog.Info("直播预告已关联", "soonest", when)
-
-	closeLivePreviewModal(page)
-	return nil
+	return nil // defer 关弹窗
 }
 
 // pickSoonestLiveItem 从 .list-item 列表按开播时间（.item-left .header span 首个，

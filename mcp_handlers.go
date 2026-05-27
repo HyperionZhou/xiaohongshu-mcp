@@ -159,18 +159,24 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 	// 解析原创参数
 	isOriginal, _ := args["is_original"].(bool)
 
-	logrus.Infof("MCP: 发布内容 - 标题: %s, 图片数量: %d, 标签数量: %d, 定时: %s, 原创: %v, visibility: %s, 商品: %v", title, len(imagePaths), len(tags), scheduleAt, isOriginal, visibility, products)
+	// 发布组件（2026-05-27）：群聊（必绑）+ 直播预告（best-effort）。
+	groupChat, _ := args["group_chat"].(string)
+	bindLivePreview, _ := args["bind_live_preview"].(bool)
+
+	logrus.Infof("MCP: 发布内容 - 标题: %s, 图片数量: %d, 标签数量: %d, 定时: %s, 原创: %v, visibility: %s, 商品: %v, 群聊: %s, 直播预告: %v", title, len(imagePaths), len(tags), scheduleAt, isOriginal, visibility, products, groupChat, bindLivePreview)
 
 	// 构建发布请求
 	req := &PublishRequest{
-		Title:      title,
-		Content:    content,
-		Images:     imagePaths,
-		Tags:       tags,
-		ScheduleAt: scheduleAt,
-		IsOriginal: isOriginal,
-		Visibility: visibility,
-		Products:   products,
+		Title:           title,
+		Content:         content,
+		Images:          imagePaths,
+		Tags:            tags,
+		ScheduleAt:      scheduleAt,
+		IsOriginal:      isOriginal,
+		Visibility:      visibility,
+		Products:        products,
+		GroupChat:       groupChat,
+		BindLivePreview: bindLivePreview,
 	}
 
 	// 执行发布
