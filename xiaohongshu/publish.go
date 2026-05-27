@@ -20,14 +20,16 @@ import (
 
 // PublishImageContent 发布图文内容
 type PublishImageContent struct {
-	Title        string
-	Content      string
-	Tags         []string
-	ImagePaths   []string
-	ScheduleTime *time.Time // 定时发布时间，nil 表示立即发布
-	IsOriginal   bool       // 是否声明原创
-	Visibility   string     // 可见范围: "公开可见"(默认), "仅自己可见", "仅互关好友可见"
-	Products     []string   // 商品关键词列表，用于绑定带货商品
+	Title           string
+	Content         string
+	Tags            []string
+	ImagePaths      []string
+	ScheduleTime    *time.Time // 定时发布时间，nil 表示立即发布
+	IsOriginal      bool       // 是否声明原创
+	Visibility      string     // 可见范围: "公开可见"(默认), "仅自己可见", "仅互关好友可见"
+	Products        []string   // 商品关键词列表，用于绑定带货商品
+	GroupChat       string     // 群聊名；空=不绑（必绑：配了绑不上→发布失败）
+	BindLivePreview bool       // true=关联最近一场未来直播预告（best-effort）
 }
 
 type PublishAction struct {
@@ -90,7 +92,7 @@ func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent
 
 	logrus.Infof("发布内容: title=%s, images=%v, tags=%v, schedule=%v, original=%v, visibility=%s, products=%v", content.Title, len(content.ImagePaths), tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products)
 
-	if err := submitPublish(page, content.Title, content.Content, tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products); err != nil {
+	if err := submitPublish(page, content.Title, content.Content, tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products, content.GroupChat, content.BindLivePreview); err != nil {
 		return errors.Wrap(err, "小红书发布失败")
 	}
 
@@ -274,7 +276,7 @@ func waitForUploadComplete(page *rod.Page, expectedCount int) error {
 	return errors.Errorf("第%d张图片上传超时(60s)，请检查网络连接和图片大小", expectedCount)
 }
 
-func submitPublish(page *rod.Page, title, content string, tags []string, scheduleTime *time.Time, isOriginal bool, visibility string, products []string) error {
+func submitPublish(page *rod.Page, title, content string, tags []string, scheduleTime *time.Time, isOriginal bool, visibility string, products []string, groupChat string, bindLivePreview bool) error {
 	titleElem, err := page.Element("div.d-input input")
 	if err != nil {
 		return errors.Wrap(err, "查找标题输入框失败")
@@ -339,6 +341,18 @@ func submitPublish(page *rod.Page, title, content string, tags []string, schedul
 	// 绑定商品
 	if err := bindProducts(page, products); err != nil {
 		return errors.Wrap(err, "绑定商品失败")
+	}
+
+	// 绑定群聊（必绑：配了 groupChat 但下拉没匹配到 → error → 整帖失败重试，与 bindProducts 一致）
+	if err := bindGroupChat(page, groupChat); err != nil {
+		return errors.Wrap(err, "绑定群聊失败")
+	}
+
+	// 绑定直播预告（best-effort：失败只 warning 不挡发布；无未来预告则内部静默跳过）
+	if bindLivePreview {
+		if err := bindLivePreviewComponent(page); err != nil {
+			slog.Warn("绑定直播预告失败，继续发布", "error", err)
+		}
 	}
 
 	if err := clickPublishButton(page); err != nil {
@@ -1469,4 +1483,194 @@ func waitForModalClose(page *rod.Page) error {
 	}
 
 	return errors.New("等待弹窗关闭超时")
+}
+
+// ============================================================ //
+// 群聊 / 直播预告绑定（发布组件区）— 选择器来自 2026-05-27 spike 实测
+// ============================================================ //
+
+// bindGroupChat 绑定群聊（"添加组件"区「选择群聊」d-select）。仿 setVisibility 的 d-select 交互。
+//
+//	name == ""        → 不绑（skip，返回 nil）
+//	name 非空但没匹配  → 返回 error（**必绑**：submitPublish 据此整帖失败重试，与 bindProducts 一致）
+//
+// spike 实测：trigger=.group-card-wrapper .d-select-content；选项=.d-options-wrapper
+// .d-grid-item .custom-option，群名在 .group-info .name（同 setVisibility 选项选择器）。
+func bindGroupChat(page *rod.Page, name string) error {
+	if name == "" {
+		return nil
+	}
+	slog.Info("开始绑定群聊", "name", name)
+
+	// 点开群聊 d-select 下拉
+	// 5s 上界：选择器失效/组件缺失时快速失败（必绑→整帖失败），不阻塞到 page 的 300s timeout。
+	trigger, err := page.Timeout(5 * time.Second).Element("div.group-card-wrapper div.d-select-content")
+	if err != nil {
+		return errors.Wrap(err, "查找群聊下拉框失败（账号可能无群聊组件）")
+	}
+	if err := trigger.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return errors.Wrap(err, "点击群聊下拉框失败")
+	}
+
+	// 轮询群选项（XHS 下拉 lazy render，固定 sleep 会 race；products 也踩过同坑）。
+	// 最多 10s：出现匹配即点选返回；超时仍无匹配才判失败（必绑→整帖失败，codex P2）。
+	deadline := time.Now().Add(10 * time.Second)
+	var available []string
+	for time.Now().Before(deadline) {
+		opts, _ := page.Elements("div.d-options-wrapper div.d-grid-item div.custom-option")
+		available = available[:0]
+		for _, opt := range opts {
+			// Elements（非阻塞）而非 Element：非群选项（可见范围/地点等 custom-option 无
+			// .group-info）会让 opt.Element 默认 retry 卡到 300s。
+			names, _ := opt.Elements("div.group-info div.name")
+			if len(names) == 0 {
+				continue
+			}
+			gname, e := names[0].Text()
+			if e != nil {
+				continue
+			}
+			gname = strings.TrimSpace(gname)
+			available = append(available, gname)
+			if gname == name {
+				if err := opt.Click(proto.InputMouseButtonLeft, 1); err != nil {
+					return errors.Wrap(err, "选择群聊失败")
+				}
+				slog.Info("已选择群聊", "name", name)
+				time.Sleep(300 * time.Millisecond)
+				return nil
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return errors.Errorf("未找到群聊 %q（10s 内账号可选群: %v）", name, available)
+}
+
+// bindLivePreviewComponent 关联最近一场未来直播预告（"添加组件"区「关联直播预告」→ d-modal）。
+// best-effort：调用方 submitPublish 对返回 error 只 warning、不挡发布。
+//
+//	无未来预告（列表空）→ 关弹窗 + 返回 nil（正常跳过，非错误）
+//	有预告           → 按开播时间升序取最早一场，点其「关联预告」按钮，关弹窗
+//
+// spike 实测：入口=.live-preview-wrapper .setting-card；弹窗列表=.list-area .list-item；
+// 开播时间=.item-left .header span（首个，格式 2006-01-02 15:04）；关联按钮=.item-right
+// button「关联预告」；关闭=.d-modal-close。
+func bindLivePreviewComponent(page *rod.Page) error {
+	slog.Info("开始绑定直播预告")
+
+	// 5s 上界：best-effort，组件缺失/选择器变化时快速返回（调用方吞成 warning），
+	// 不让 page.Element 默认 sleeper 卡到 page 的 300s timeout（codex P2）。
+	card, err := page.Timeout(5 * time.Second).Element("div.live-preview-wrapper div.setting-card")
+	if err != nil {
+		return errors.Wrap(err, "查找直播预告入口失败")
+	}
+	if err := card.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return errors.Wrap(err, "点击直播预告入口失败")
+	}
+	// 点开后所有返回路径都关弹窗，避免出错时弹窗遮挡后续 clickPublishButton（codex P2）。
+	defer closeLivePreviewModal(page)
+
+	// 等弹窗列表区出现（async 拉取预告）。用非阻塞 page.Has —— page.Element 默认 sleeper 会
+	// retry 到 page 的 300s timeout，把"10s best-effort"拖成几分钟（codex P2）。
+	var listArea *rod.Element
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if has, el, _ := page.Has("div.list-area"); has && el != nil {
+			if visible, _ := el.Visible(); visible {
+				listArea = el
+				break
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if listArea == nil {
+		return errors.New("等待直播预告弹窗超时")
+	}
+
+	// 轮询列表项（async 加载，list-area 可能先于 item 渲染 → 查一次会 race、漏绑已存在的
+	// 预告，codex P2）。最多 8s：出现 item 即处理；超时仍无 → 视为无未来预告跳过。
+	var items rod.Elements
+	itemDeadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(itemDeadline) {
+		items, _ = listArea.Elements("div.list-item")
+		if len(items) > 0 {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if len(items) == 0 {
+		slog.Info("无未来直播预告（8s 内无列表项），跳过")
+		return nil // defer 关弹窗
+	}
+
+	// 选最近一场（开播时间升序最早）；解析全失败则退化取第一项
+	target, when := pickSoonestLiveItem(items)
+	if target == nil {
+		target = items[0]
+	}
+	slog.Info("准备关联直播预告", "candidates", len(items), "soonest", when)
+
+	// 找该项的「关联预告」按钮（.item-right 内还有 .jump-btn「查看直播计划」，要按文本区分）
+	btns, err := target.Elements("div.item-right button")
+	if err != nil || len(btns) == 0 {
+		return errors.New("未找到关联预告按钮")
+	}
+	var assoc *rod.Element
+	for _, b := range btns {
+		if t, _ := b.Text(); strings.Contains(t, "关联预告") {
+			assoc = b
+			break
+		}
+	}
+	if assoc == nil {
+		return errors.New("未找到「关联预告」按钮（可能已关联或文案变化）")
+	}
+	if err := assoc.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return errors.Wrap(err, "点击关联预告失败")
+	}
+	time.Sleep(800 * time.Millisecond)
+	slog.Info("直播预告已关联", "soonest", when)
+	return nil // defer 关弹窗
+}
+
+// pickSoonestLiveItem 从 .list-item 列表按开播时间（.item-left .header span 首个，
+// 格式 2006-01-02 15:04）升序取最早。解析失败的项跳过；全失败返回 (nil, "")。
+func pickSoonestLiveItem(items []*rod.Element) (*rod.Element, string) {
+	var best *rod.Element
+	var bestT time.Time
+	var bestStr string
+	for _, it := range items {
+		// Elements（非阻塞）而非 Element：缺 header span 的项不会卡到 300s page timeout。
+		spans, _ := it.Elements("div.item-left div.header span")
+		if len(spans) == 0 {
+			continue
+		}
+		raw, e := spans[0].Text()
+		if e != nil {
+			continue
+		}
+		raw = strings.TrimSpace(raw)
+		t, e := time.Parse("2006-01-02 15:04", raw)
+		if e != nil {
+			continue
+		}
+		if best == nil || t.Before(bestT) {
+			best, bestT, bestStr = it, t, raw
+		}
+	}
+	return best, bestStr
+}
+
+// closeLivePreviewModal 点右上角 X 关弹窗，避免遮挡后续 clickPublishButton。失败仅 warning。
+func closeLivePreviewModal(page *rod.Page) {
+	// 非阻塞 Has：关联成功后弹窗可能已自动关闭、或 DOM 变化，page.Element 会卡到 300s（codex P2）。
+	has, x, _ := page.Has("span.d-modal-close.d-clickable")
+	if !has || x == nil {
+		return
+	}
+	if err := x.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		slog.Warn("关闭直播预告弹窗失败", "error", err)
+		return
+	}
+	time.Sleep(300 * time.Millisecond)
 }

@@ -36,6 +36,9 @@ type PublishRequest struct {
 	IsOriginal bool     `json:"is_original,omitempty"` // 是否声明原创
 	Visibility string   `json:"visibility,omitempty"`  // 可见范围: "公开可见"(默认), "仅自己可见", "仅互关好友可见"
 	Products   []string `json:"products,omitempty"`    // 商品关键词列表，用于绑定带货商品
+	// 发布组件（2026-05-27）：群聊（必绑：配了绑不上→发布失败）+ 直播预告（best-effort）。
+	GroupChat       string `json:"group_chat,omitempty"`        // 群聊名；空=不绑
+	BindLivePreview bool   `json:"bind_live_preview,omitempty"` // true=关联最近一场未来直播预告
 }
 
 // LoginStatusResponse 登录状态响应
@@ -212,14 +215,16 @@ func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishReq
 
 	// 构建发布内容
 	content := xiaohongshu.PublishImageContent{
-		Title:        req.Title,
-		Content:      req.Content,
-		Tags:         req.Tags,
-		ImagePaths:   imagePaths,
-		ScheduleTime: scheduleTime,
-		IsOriginal:   req.IsOriginal,
-		Visibility:   req.Visibility,
-		Products:     req.Products,
+		Title:           req.Title,
+		Content:         req.Content,
+		Tags:            req.Tags,
+		ImagePaths:      imagePaths,
+		ScheduleTime:    scheduleTime,
+		IsOriginal:      req.IsOriginal,
+		Visibility:      req.Visibility,
+		Products:        req.Products,
+		GroupChat:       req.GroupChat,
+		BindLivePreview: req.BindLivePreview,
 	}
 
 	// 执行发布
