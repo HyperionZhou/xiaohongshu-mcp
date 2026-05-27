@@ -1503,7 +1503,8 @@ func bindGroupChat(page *rod.Page, name string) error {
 	slog.Info("开始绑定群聊", "name", name)
 
 	// 点开群聊 d-select 下拉
-	trigger, err := page.Element("div.group-card-wrapper div.d-select-content")
+	// 5s 上界：选择器失效/组件缺失时快速失败（必绑→整帖失败），不阻塞到 page 的 300s timeout。
+	trigger, err := page.Timeout(5 * time.Second).Element("div.group-card-wrapper div.d-select-content")
 	if err != nil {
 		return errors.Wrap(err, "查找群聊下拉框失败（账号可能无群聊组件）")
 	}
@@ -1553,7 +1554,9 @@ func bindGroupChat(page *rod.Page, name string) error {
 func bindLivePreviewComponent(page *rod.Page) error {
 	slog.Info("开始绑定直播预告")
 
-	card, err := page.Element("div.live-preview-wrapper div.setting-card")
+	// 5s 上界：best-effort，组件缺失/选择器变化时快速返回（调用方吞成 warning），
+	// 不让 page.Element 默认 sleeper 卡到 page 的 300s timeout（codex P2）。
+	card, err := page.Timeout(5 * time.Second).Element("div.live-preview-wrapper div.setting-card")
 	if err != nil {
 		return errors.Wrap(err, "查找直播预告入口失败")
 	}
@@ -1648,9 +1651,9 @@ func pickSoonestLiveItem(items []*rod.Element) (*rod.Element, string) {
 
 // closeLivePreviewModal 点右上角 X 关弹窗，避免遮挡后续 clickPublishButton。失败仅 warning。
 func closeLivePreviewModal(page *rod.Page) {
-	x, err := page.Element("span.d-modal-close.d-clickable")
-	if err != nil || x == nil {
-		slog.Warn("未找到直播预告弹窗关闭按钮")
+	// 非阻塞 Has：关联成功后弹窗可能已自动关闭、或 DOM 变化，page.Element 会卡到 300s（codex P2）。
+	has, x, _ := page.Has("span.d-modal-close.d-clickable")
+	if !has || x == nil {
 		return
 	}
 	if err := x.Click(proto.InputMouseButtonLeft, 1); err != nil {
