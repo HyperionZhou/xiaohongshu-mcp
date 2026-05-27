@@ -26,7 +26,7 @@ type PublishContentArgs struct {
 	Visibility      string   `json:"visibility,omitempty" jsonschema:"可见范围（可选），支持: 公开可见(默认)、仅自己可见、仅互关好友可见。不填则默认公开可见"`
 	Products        []string `json:"products,omitempty" jsonschema:"商品关键词列表（可选），用于绑定带货商品。填写商品名称或商品ID，系统会自动搜索并选择第一个匹配结果。需账号已开通商品功能。示例: [面膜, 防晒霜SPF50]"`
 	GroupChat       string   `json:"group_chat,omitempty" jsonschema:"群聊名（可选），发帖时在「选择群聊」下拉里按此群名匹配并选中；匹配不到则发布失败。需账号已建该群。"`
-	BindLivePreview bool     `json:"bind_live_preview,omitempty" jsonschema:"是否关联直播预告（可选），true=关联最近一场未来直播预告，无未来预告则跳过。best-effort。"`
+	BindLivePreview bool     `json:"bind_live_preview,omitempty" jsonschema:"是否关联直播预告（可选）。true 表示关联最近一场未来直播预告；无未来预告则跳过；best-effort，绑定失败不影响发布。"`
 }
 
 // PublishVideoArgs 发布视频的参数（仅支持本地单个视频文件）

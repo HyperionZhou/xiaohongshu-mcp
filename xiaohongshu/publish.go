@@ -721,6 +721,56 @@ func inputTags(contentElem *rod.Element, tags []string) error {
 	return nil
 }
 
+// topicCountRe 匹配下拉项名称同一行尾部、且与名称有空白分隔的浏览/讨论量
+// （如「whoop手环 1.2万浏览」里的「 1.2万浏览」）。要求计数前必须有空白，
+// 这样名称本身结尾的「数字+万」（如「运动1万」「9万」）不会被误当计数剥掉。
+var topicCountRe = regexp.MustCompile(`\s[\d][\d.,]*\s*(?:万|亿|[wW])?\s*(?:次)?\s*(?:浏览|讨论|阅读|参与|看过|收藏)\s*$|\s[\d][\d.,]*\s*(?:万|亿)\s*$`)
+
+// normalizeTopicName 归一化话题名：去前后空白、去前导 #、去掉全部空白、转小写。
+func normalizeTopicName(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "#")
+	s = strings.Join(strings.Fields(s), "") // 去掉含全角在内的所有空白
+	return strings.ToLower(s)
+}
+
+// stripTopicCount 去掉行尾的浏览/讨论量后缀，便于名称与计数同一行时取到纯名称。
+func stripTopicCount(line string) string {
+	return topicCountRe.ReplaceAllString(strings.TrimSpace(line), "")
+}
+
+// matchTopicItemIndex 在话题下拉项文本里找与 tag 话题名「精确相等」的项，返回其索引；找不到返回 -1。
+// 逐项逐行比对（名称常与浏览量分行），只认精确同名，杜绝把 tag 误选成相近/无关的推荐话题。
+func matchTopicItemIndex(itemTexts []string, tag string) int {
+	want := normalizeTopicName(tag)
+	if want == "" {
+		return -1
+	}
+	for i, text := range itemTexts {
+		for _, line := range strings.Split(text, "\n") {
+			if normalizeTopicName(stripTopicCount(line)) == want {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// topicNamesForLog 仅用于日志：取每个候选项首行做简短展示。
+func topicNamesForLog(texts []string) []string {
+	names := make([]string, 0, len(texts))
+	for _, t := range texts {
+		line := t
+		if i := strings.IndexByte(t, '\n'); i >= 0 {
+			line = t[:i]
+		}
+		names = append(names, strings.TrimSpace(line))
+	}
+	return names
+}
+
+// inputTag 输入单个话题：打出 #+名称后，轮询等待联想下拉里出现「与名称精确同名」的项再点选；
+// 在 maxWait 内始终匹配不到，就退化为纯文本（补一个空格），绝不盲点第一项导致选错话题。
 func inputTag(contentElem *rod.Element, tag string) error {
 	if err := contentElem.Input("#"); err != nil {
 		return errors.Wrap(err, "输入#失败")
@@ -734,29 +784,35 @@ func inputTag(contentElem *rod.Element, tag string) error {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	time.Sleep(1 * time.Second)
-
 	page := contentElem.Page()
-	topicContainer, err := page.Element("#creator-editor-topic-container")
-	if err != nil || topicContainer == nil {
-		slog.Warn("未找到标签联想下拉框，直接输入空格", "tag", tag)
-		return contentElem.Input(" ")
+	const (
+		maxWait  = 3 * time.Second
+		interval = 150 * time.Millisecond
+	)
+	var lastTexts []string
+	for deadline := time.Now().Add(maxWait); time.Now().Before(deadline); time.Sleep(interval) {
+		// Elements 是快照查询：无匹配立即返回空切片，不像 Element 那样重试阻塞。
+		items, _ := page.Elements("#creator-editor-topic-container .item")
+		texts := make([]string, len(items))
+		for i, it := range items {
+			texts[i], _ = it.Text()
+		}
+		lastTexts = texts
+		idx := matchTopicItemIndex(texts, tag)
+		if idx < 0 {
+			continue
+		}
+		if err := items[idx].Click(proto.InputMouseButtonLeft, 1); err != nil {
+			// 多半是下拉重渲染致元素句柄失效；不致命，下一轮重查重试。
+			slog.Warn("点击话题项失败，下一轮重试", "tag", tag, "err", err)
+			continue
+		}
+		slog.Info("话题精确匹配并选中", "tag", tag, "index", idx)
+		time.Sleep(500 * time.Millisecond) // 等待标签处理完成
+		return nil
 	}
-
-	firstItem, err := topicContainer.Element(".item")
-	if err != nil || firstItem == nil {
-		slog.Warn("未找到标签联想选项，直接输入空格", "tag", tag)
-		return contentElem.Input(" ")
-	}
-
-	if err := firstItem.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return errors.Wrap(err, "点击标签联想选项失败")
-	}
-	slog.Info("成功点击标签联想选项", "tag", tag)
-	time.Sleep(200 * time.Millisecond)
-
-	time.Sleep(500 * time.Millisecond) // 等待标签处理完成
-	return nil
+	slog.Warn("未匹配到同名话题，作为纯文本输入", "tag", tag, "candidates", topicNamesForLog(lastTexts))
+	return contentElem.Input(" ")
 }
 
 func findTextboxByPlaceholder(page *rod.Page) (*rod.Element, error) {
