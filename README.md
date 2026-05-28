@@ -857,6 +857,8 @@ npx mcporter list xiaohongshu-mcp
   - `is_original`: 是否声明原创（可选），默认不声明
   - `visibility`: 可见范围（可选），支持 `公开可见`（默认）、`仅自己可见`、`仅互关好友可见`
   - `products`: 商品关键词列表（可选），用于绑定带货商品。填写商品名称或商品ID，系统会自动搜索并选择第一个匹配结果。需账号已开通商品功能。示例: [面膜, 防晒霜SPF50]
+  - `group_chat`: 群聊名（可选）。发帖时在「选择群聊」下拉里按此群名精确匹配并选中（selector：`.group-card-wrapper .d-select-content` → `.d-options-wrapper .d-grid-item .custom-option .group-info .name`）。账号需已建该群；配了但匹配不到 → 发布失败（必绑语义，与 products 一致）。留空或不传 = 不绑。
+  - `bind_live_preview`: 是否关联直播预告（可选），默认 `false`。`true` = 打开「关联直播预告」弹窗（`.live-preview-wrapper .setting-card → d-modal .list-area`），按开播时间取最近一场**未来**预告关联（点 `.item-right button` 含「关联预告」文本，即点即提交）；列表空则跳过。绑定失败仅 warning、不挡发布（best-effort）。⚠️ XHS 公开渲染时机：横幅通常只在直播临近（数小时～1 天前）才在帖子上显示，提前几天发的帖子上看不到属正常 —— 后端已绑（创作中心可查）。
 - `publish_with_video` - 发布视频内容到小红书（必需：title, content, video）
   - `video`: 本地视频文件绝对路径（仅支持单个视频文件）
   - `tags`: 话题标签列表（可选），如 `["美食", "旅行", "生活"]`
