@@ -44,6 +44,10 @@ func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
 
 	pp := page.Timeout(300 * time.Second)
 
+	if err := ensureCreatorSession(pp); err != nil {
+		return nil, err
+	}
+
 	// 使用更稳健的导航和等待策略
 	if err := pp.Navigate(urlOfPublic); err != nil {
 		return nil, errors.Wrap(err, "导航到发布页面失败")
@@ -301,6 +305,7 @@ func submitPublish(page *rod.Page, title, content string, tags []string, schedul
 	if err := contentElem.Input(content); err != nil {
 		return errors.Wrap(err, "输入正文失败")
 	}
+	closeFeatureGuide(page)
 	if err := waitAndClickTitleInput(titleElem); err != nil {
 		return err
 	}
@@ -593,6 +598,25 @@ func clickPublishWidget(page *rod.Page, widget *rod.Element) error {
 		return errors.Wrap(err, "点击发布按钮失败")
 	}
 	return nil
+}
+
+// closeFeatureGuide 页面有功能引导卡（如图片编辑引导）时点「我知道了」关闭（移植自上游 #853）
+func closeFeatureGuide(page *rod.Page) {
+	has, btn, err := page.Has(".feature-guide__btn")
+	if err != nil || !has {
+		return
+	}
+	if visible, err := btn.Visible(); err != nil || !visible {
+		return
+	}
+
+	btn = btn.Timeout(5 * time.Second)
+	defer btn.CancelTimeout()
+	if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		slog.Warn("关闭功能引导卡失败", "error", err)
+		return
+	}
+	slog.Info("已关闭功能引导卡")
 }
 
 // waitAndClickTitleInput 在填写正文后等待 1 秒并回点标题输入框，增强后续交互稳定性
